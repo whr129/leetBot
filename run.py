@@ -19,7 +19,6 @@ logger = logging.getLogger("leetbot")
 async def main() -> None:
     """Run the bot."""
     token = (config.DISCORD_TOKEN or "").strip().replace("\n", "").replace("\r", "")
-    # Remove quotes if user wrapped the token
     if token.startswith('"') and token.endswith('"'):
         token = token[1:-1].strip()
     if token.startswith("'") and token.endswith("'"):
@@ -30,12 +29,12 @@ async def main() -> None:
             "https://discord.com/developers/applications"
         )
         return
-    # Discord bot tokens are typically 59-72 chars; client secrets are different
     if len(token) < 50:
         logger.warning("Token seems short (%d chars). Make sure you copied the BOT token, not the Client ID.", len(token))
 
     bot = create_bot()
     setup_cogs(bot)
+
     try:
         await bot.start(token)
     except discord.errors.LoginFailure:
@@ -47,15 +46,20 @@ async def main() -> None:
             "  - Check for extra spaces or missing chars when pasting"
         )
         return
+    except asyncio.CancelledError:
+        logger.info("Received shutdown signal, cleaning up...")
     except Exception as e:
         logger.exception("Bot failed: %s", e)
         raise
     finally:
+        if not bot.is_closed():
+            await bot.close()
         await bot.leetcode.close()
-        study = getattr(bot, "study_service", None)
-        if study and hasattr(study, "close"):
-            await study.close()
+        logger.info("Shutdown complete.")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass

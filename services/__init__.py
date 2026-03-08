@@ -1,1 +1,1 @@
-"""Services for LeetCode, AI, and Study Plan."""
+"""Services for LeetCode and AI."""

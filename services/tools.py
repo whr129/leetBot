@@ -113,38 +113,67 @@ TOOL_DEFINITIONS: list[dict] = [
     },
 ]
 
-STUDY_TOOL_DEFINITIONS: list[dict] = [
+NOTIFY_TOOL_DEFINITIONS: list[dict] = [
     {
         "type": "function",
         "function": {
-            "name": "get_study_progress",
-            "description": "Get the Discord user's study plan progress: problems added, completed, streak days, last activity.",
+            "name": "get_notify_status",
+            "description": "Check whether daily LeetCode challenge notifications are enabled for the current Discord server, and if so, which channel and time they are configured for.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "discord_id": {
+                    "guild_id": {
                         "type": "integer",
-                        "description": "The Discord user ID",
+                        "description": "The Discord server (guild) ID",
                     },
                 },
-                "required": ["discord_id"],
+                "required": ["guild_id"],
             },
         },
     },
     {
         "type": "function",
         "function": {
-            "name": "get_next_study_problem",
-            "description": "Get the next recommended problem from the user's study plan (first incomplete), or a random problem if none remain.",
+            "name": "setup_notify",
+            "description": "Enable daily LeetCode challenge notifications for a Discord server. Posts the daily problem to the specified channel at the given UTC time each day.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "discord_id": {
+                    "guild_id": {
                         "type": "integer",
-                        "description": "The Discord user ID",
+                        "description": "The Discord server (guild) ID",
+                    },
+                    "channel_id": {
+                        "type": "integer",
+                        "description": "The channel ID to post daily challenges in",
+                    },
+                    "hour": {
+                        "type": "integer",
+                        "description": "Hour to send (0-23, UTC). Default: 8",
+                    },
+                    "minute": {
+                        "type": "integer",
+                        "description": "Minute to send (0-59, UTC). Default: 0",
                     },
                 },
-                "required": ["discord_id"],
+                "required": ["guild_id", "channel_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "stop_notify",
+            "description": "Disable daily LeetCode challenge notifications for a Discord server.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "guild_id": {
+                        "type": "integer",
+                        "description": "The Discord server (guild) ID",
+                    },
+                },
+                "required": ["guild_id"],
             },
         },
     },
@@ -154,18 +183,14 @@ STUDY_TOOL_DEFINITIONS: list[dict] = [
 class ToolExecutor:
     """Dispatches tool calls to the appropriate service methods."""
 
-    def __init__(
-        self,
-        leetcode: LeetCodeService,
-        study_service: Optional[Any] = None,
-    ):
+    def __init__(self, leetcode: LeetCodeService, notify_cog: Optional[Any] = None):
         self.leetcode = leetcode
-        self.study = study_service
+        self.notify_cog = notify_cog
 
     def get_tool_definitions(self) -> list[dict]:
         tools = list(TOOL_DEFINITIONS)
-        if self.study is not None:
-            tools.extend(STUDY_TOOL_DEFINITIONS)
+        if self.notify_cog is not None:
+            tools.extend(NOTIFY_TOOL_DEFINITIONS)
         return tools
 
     async def execute(self, tool_name: str, arguments: dict) -> str:
@@ -239,22 +264,39 @@ class ToolExecutor:
             profile = await self.leetcode.get_user_profile(args["username"])
             return asdict(profile)
 
-        if name == "get_study_progress" and self.study:
-            progress = await self.study.get_progress(args["discord_id"])
-            if not progress:
-                return {"error": "No study plan found. Use /study start first."}
+        if name == "get_notify_status" and self.notify_cog:
+            cfg = self.notify_cog._guild_configs.get(args["guild_id"])
+            if not cfg or not cfg.get("enabled"):
+                return {"enabled": False}
             return {
-                "total_added": progress.total_added,
-                "completed": progress.completed,
-                "streak_days": progress.streak_days,
-                "last_activity": str(progress.last_activity) if progress.last_activity else None,
+                "enabled": True,
+                "channel_id": cfg["channel_id"],
+                "hour": cfg["hour"],
+                "minute": cfg["minute"],
+                "last_sent": cfg.get("last_sent"),
             }
 
-        if name == "get_next_study_problem" and self.study:
-            prob = await self.study.get_next_problem(args["discord_id"])
-            if not prob:
-                return {"error": "No problems available."}
-            return prob
+        if name == "setup_notify" and self.notify_cog:
+            import config as _cfg
+            h = args.get("hour", _cfg.DAILY_NOTIFY_HOUR)
+            m = args.get("minute", _cfg.DAILY_NOTIFY_MINUTE)
+            self.notify_cog._guild_configs[args["guild_id"]] = {
+                "channel_id": args["channel_id"],
+                "hour": h,
+                "minute": m,
+                "enabled": True,
+                "last_sent": None,
+            }
+            self.notify_cog._save_config()
+            return {"status": "enabled", "channel_id": args["channel_id"], "hour": h, "minute": m}
+
+        if name == "stop_notify" and self.notify_cog:
+            cfg = self.notify_cog._guild_configs.get(args["guild_id"])
+            if not cfg or not cfg.get("enabled"):
+                return {"status": "already_disabled"}
+            cfg["enabled"] = False
+            self.notify_cog._save_config()
+            return {"status": "disabled"}
 
         return {"error": f"Unknown tool: {name}"}
 

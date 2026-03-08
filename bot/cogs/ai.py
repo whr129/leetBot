@@ -57,8 +57,8 @@ def setup(bot: discord.Bot) -> None:
     from services.tools import ToolExecutor
     import config
 
-    study_service = getattr(bot, "study_service", None)
-    executor = ToolExecutor(leetcode=bot.leetcode, study_service=study_service)
+    notify_cog = bot.cogs.get("DailyNotifyCog")
+    executor = ToolExecutor(leetcode=bot.leetcode, notify_cog=notify_cog)
     bot.react_agent = ReActAgent(
         api_key=config.OPENAI_API_KEY,
         tool_executor=executor,

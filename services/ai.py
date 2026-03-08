@@ -15,7 +15,7 @@ SYSTEM_PROMPT = """\
 You are a helpful LeetCode study assistant in a Discord server.
 
 You can look up problems, search by topic, fetch daily challenges, check user stats, \
-and access study plan data using the tools provided. Always use tools to retrieve \
+and check user stats using the tools provided. Always use tools to retrieve \
 real data rather than guessing or fabricating problem details.
 
 Guidelines:
@@ -78,9 +78,6 @@ class ReActAgent:
         user_content = user_message
         if context:
             user_content = f"{context}\n\n{user_message}"
-        if discord_id is not None:
-            user_content += f"\n\n[Discord user ID for study plan lookups: {discord_id}]"
-
         messages.append({"role": "user", "content": user_content})
 
         tools = self.executor.get_tool_definitions()

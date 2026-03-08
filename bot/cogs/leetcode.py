@@ -8,7 +8,6 @@ import discord
 from discord.ext import commands
 from discord.commands import SlashCommandGroup
 
-import config
 from bot.utils.embeds import daily_embed, error_embed, problem_embed, user_stats_embed
 from services.leetcode import LeetCodeAPIError, LeetCodeService
 
@@ -130,26 +129,11 @@ class LeetCodeCog(commands.Cog):
     async def stats(
         self,
         ctx: discord.ApplicationContext,
-        username: discord.Option(str, description="LeetCode username", required=False) = None,
+        username: discord.Option(str, description="LeetCode username"),
     ) -> None:
         """Get LeetCode user stats."""
         await ctx.defer()
         name = username
-        if not name and config.DATABASE_ENABLED:
-            study = getattr(self.bot, "study_service", None)
-            if study:
-                try:
-                    pool = await study._get_pool()
-                    async with pool.acquire() as conn:
-                        row = await conn.fetchrow(
-                            "SELECT leetcode_username FROM users WHERE discord_id = $1",
-                            ctx.author.id,
-                        )
-                        if row:
-                            name = row["leetcode_username"]
-                except Exception:
-                    pass
-            name = name or "lee215"
         try:
             profile = await self.leetcode.get_user_profile(name)
             embed = user_stats_embed(

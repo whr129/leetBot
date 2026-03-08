@@ -1,19 +1,18 @@
 # LeetBot - LeetCode Discord AI Assistant
 
-A Discord bot that integrates LeetCode with AI capabilities for study assistance.
+A Discord bot that integrates LeetCode with AI capabilities.
 
 ## Features
 
 - **LeetCode commands** (`/leetcode`): daily challenge, problem lookup, random problem, user stats
 - **AI commands** (`/ai`): ask questions, natural-language problem search, practice suggestions
-- **Study plan** (`/study`): track progress, add problems, get next recommended problem
+- **Daily notifications** (`/notify`): schedule automatic daily challenge posts to a channel
 
 ## Setup
 
 ### Prerequisites
 
 - Python 3.10+
-- PostgreSQL (for study plan storage)
 - [Discord Bot Token](https://discord.com/developers/applications)
 - [OpenAI API Key](https://platform.openai.com/api-keys) (for AI features)
 
@@ -44,13 +43,13 @@ pip install --trusted-host pypi.org --trusted-host files.pythonhosted.org -r req
 ```
 DISCORD_TOKEN=your_discord_bot_token
 OPENAI_API_KEY=your_openai_api_key
-DATABASE_URL=postgresql://user:password@localhost:5432/leetbot
 ```
 
-3. Create a PostgreSQL database:
+3. Optionally configure the daily notification default time (UTC):
 
-```bash
-createdb leetbot
+```
+DAILY_NOTIFY_HOUR=8
+DAILY_NOTIFY_MINUTE=0
 ```
 
 4. Invite the bot to your server with the `applications.commands` scope.
@@ -78,7 +77,6 @@ If you see `ModuleNotFoundError: No module named 'discord'`, you're likely using
 | `/ai ask <question>` | Ask AI about LeetCode |
 | `/ai search <query>` | Search problems with natural language |
 | `/ai generate [topic] [difficulty]` | AI-suggested practice problem |
-| `/study start <username>` | Create study plan |
-| `/study progress` | View your progress |
-| `/study add <problem>` | Add problem to plan |
-| `/study next` | Get next recommended problem |
+| `/notify setup <channel> [hour] [minute]` | Enable daily challenge notifications |
+| `/notify stop` | Disable daily notifications |
+| `/notify status` | Check notification settings |

@@ -53,13 +53,8 @@ def create_bot() -> discord.Bot:
 
 
 def setup_cogs(bot: discord.Bot) -> None:
-    """Load all cogs. Study must load before AI so the agent can access study tools."""
-    cogs = ["bot.cogs.leetcode"]
-    if config.DATABASE_ENABLED:
-        cogs.append("bot.cogs.study")
-    else:
-        logger.info("Database disabled - study commands not loaded")
-    cogs.append("bot.cogs.ai")
+    """Load all cogs."""
+    cogs = ["bot.cogs.leetcode", "bot.cogs.daily_notify", "bot.cogs.ai"]
     for cog in cogs:
         try:
             bot.load_extension(cog)
