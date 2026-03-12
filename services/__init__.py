@@ -1,1 +1,1 @@
-"""Services for LeetCode and AI."""
+"""Services for LeetCode, stocks, news, alerts, and memory."""

@@ -8,10 +8,8 @@ import discord
 import config
 from services.leetcode import LeetCodeService
 
-# Configure logging - stdout + optional file
 log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 logging.basicConfig(level=logging.INFO, format=log_format)
-# Also write to logs/leetbot.log when directory exists
 log_dir = Path(__file__).resolve().parent.parent / "logs"
 if log_dir.exists():
     fh = logging.FileHandler(log_dir / "leetbot.log", encoding="utf-8")
@@ -21,12 +19,12 @@ logger = logging.getLogger("leetbot")
 
 
 def create_bot() -> discord.Bot:
-    """Create and configure the LeetBot."""
+    """Create and configure the bot."""
     intents = discord.Intents.default()
 
     bot = discord.Bot(
         intents=intents,
-        description="LeetCode AI Assistant for Discord",
+        description="Multi-Agent Discord Assistant",
     )
     bot.leetcode = LeetCodeService(base_url=config.LEETCODE_API_BASE)
 
@@ -37,7 +35,6 @@ def create_bot() -> discord.Bot:
 
     @bot.event
     async def on_application_command_error(ctx: discord.ApplicationContext, error: Exception) -> None:
-        """Handle slash command errors gracefully."""
         logger.warning(f"Command error: {ctx.command} - {error}")
         try:
             msg = str(error)
@@ -53,12 +50,18 @@ def create_bot() -> discord.Bot:
 
 
 def setup_cogs(bot: discord.Bot) -> None:
-    """Load all cogs."""
-    cogs = ["bot.cogs.leetcode", "bot.cogs.daily_notify", "bot.cogs.ai"]
+    """Load all cogs. Order matters: services must init before AI agents."""
+    cogs = [
+        "bot.cogs.leetcode",
+        "bot.cogs.stock",
+        "bot.cogs.news",
+        "bot.cogs.alerts",
+        "bot.cogs.scheduler",
+        "bot.cogs.ai",
+    ]
     for cog in cogs:
         try:
             bot.load_extension(cog)
             logger.info(f"Loaded cog: {cog}")
         except Exception as e:
             logger.warning(f"Failed to load {cog}: {e}")
-
