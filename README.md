@@ -1,6 +1,7 @@
-# LeetBot - Multi-Agent Discord Assistant
+# SWE Bot - Multi-Agent Discord Assistant
 
 A Discord bot with isolated AI agents for LeetCode, stock market, news, and personal alerts.
+Help SWE on leetcode practice, daily calendars, as well as personal stock agent.
 
 ## Features
 
