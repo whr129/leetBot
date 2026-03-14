@@ -1,284 +1,223 @@
-# Multi-Agent Expansion Plan
+# Multi-Agent Orchestrator Architecture
 
-## Architecture Overview
+## Overview
 
-Refactor the current monolithic `ReActAgent` + `ToolExecutor` into a multi-agent system where each domain has its own isolated agent, tools, and service.
+The bot uses an LLM-powered orchestrator that decomposes user queries, dispatches them to specialist agents (optionally in parallel), and synthesizes multi-agent results into a single response. All agents share a ChromaDB-backed RAG memory system with short-term, long-term, and cross-agent layers.
 
 ```mermaid
-flowchart TD
-    User[Discord User]
-    AskCmd["/ask command"]
-    Router[AgentRouter]
+flowchart TB
+    User["/ask query"] --> Orchestrator
 
-    subgraph leetcodeIsolation [LeetCode Isolation]
-        LeetAgent[LeetCode Agent]
-        LeetTools["Tools: get_problem, search..."]
-        LeetMem["Memory: data/memory/leetcode/"]
-        LeetAgent --> LeetTools
-        LeetAgent <--> LeetMem
+    subgraph orchestration [Orchestrator]
+        Orchestrator[Orchestrator] -->|"1. Plan"| Planner["Task Planner LLM"]
+        Planner -->|"task plan"| Executor["Task Executor"]
+        Executor -->|"2. Execute"| AgentPool
+        Executor -->|"3. Synthesize"| Synthesizer["Result Synthesizer LLM"]
     end
 
-    subgraph stockIsolation [Stock Isolation]
-        StockAgent[Stock Agent]
-        StockTools["Tools: get_quote, movers..."]
-        StockMem["Memory: data/memory/stock/"]
-        StockAgent --> StockTools
-        StockAgent <--> StockMem
+    subgraph AgentPool [Agent Pool]
+        LC[LeetCodeAgent]
+        ST[StockAgent]
+        NW[NewsAgent]
+        AL[AlertAgent]
     end
 
-    subgraph newsIsolation [News Isolation]
-        NewsAgent[News Agent]
-        NewsTools["Tools: get_latest, search..."]
-        NewsMem["Memory: data/memory/news/"]
-        NewsAgent --> NewsTools
-        NewsAgent <--> NewsMem
+    subgraph memory [Memory Layer]
+        STM["Short-Term Memory"]
+        LTM["Long-Term Memory"]
+        SharedMem["Shared Memory"]
+        ChromaDB[(ChromaDB)]
     end
 
-    subgraph alertIsolation [Alert Isolation]
-        AlertAgent[Alert Agent]
-        AlertTools["Tools: create_alert, list..."]
-        AlertMem["Memory: data/memory/alerts/"]
-        AlertAgent --> AlertTools
-        AlertAgent <--> AlertMem
+    subgraph playbooks [Playbooks]
+        PB1["orchestrator.md"]
+        PB2["leetcode.md"]
+        PB3["stock.md"]
+        PB4["news.md"]
+        PB5["alerts.md"]
     end
 
-    LeetSvc[LeetCodeService]
-    StockSvc[StockService]
-    NewsSvc[NewsService]
-    AlertSvc[AlertService]
-
-    User --> AskCmd --> Router
-    Router --> LeetAgent
-    Router --> StockAgent
-    Router --> NewsAgent
-    Router --> AlertAgent
-
-    LeetTools --> LeetSvc
-    StockTools --> StockSvc
-    NewsTools --> NewsSvc
-    AlertTools --> AlertSvc
-
-    Scheduler[SchedulerCog] --> LeetSvc
-    Scheduler --> StockSvc
-    Scheduler --> NewsSvc
-    Scheduler --> AlertSvc
+    AgentPool <-->|"read/write"| memory
+    Orchestrator -->|"load behavior"| playbooks
+    AgentPool -->|"load behavior"| playbooks
+    STM --> ChromaDB
+    LTM --> ChromaDB
+    SharedMem --> ChromaDB
+    Synthesizer --> User
 ```
 
+## Orchestrator Pipeline
 
+The orchestrator (`agents/orchestrator.py`) replaces the old keyword-based router with a 3-phase pipeline:
 
-## New Directory Structure
+### Phase 1: Plan
 
-```
-agents/
-  __init__.py
-  base.py            # BaseAgent - generic ReAct loop + memory injection
-  router.py          # Routes /ask queries to the correct specialist agent
-  leetcode.py        # LeetCode agent: system prompt + tool defs + executor
-  stock.py           # Stock agent: system prompt + tool defs + executor
-  news.py            # News agent: system prompt + tool defs + executor
-  alerts.py          # Alert agent: system prompt + tool defs + executor
+An LLM call analyzes the query and produces a structured task plan:
 
-services/
-  leetcode.py        # (existing, unchanged)
-  stock.py           # yfinance wrapper
-  news.py            # RSS feed parser (feedparser)
-  alerts.py          # Alert CRUD + checking (JSON file storage)
-  memory.py          # AgentMemory class - namespace-scoped, per-agent isolation
+```python
+@dataclass
+class TaskPlan:
+    agents: list[str]           # which agents to invoke
+    subtasks: list[SubTask]     # specific instruction per agent
+    parallel: bool              # run concurrently or sequentially
+    needs_synthesis: bool       # whether to merge multi-agent results
 
-bot/cogs/
-  leetcode.py        # (existing, unchanged)
-  stock.py           # /stock commands
-  news.py            # /news commands
-  alerts.py          # /alert commands
-  scheduler.py       # All scheduled tasks consolidated
-  ai.py              # /ask with agent routing
+@dataclass
+class SubTask:
+    agent_name: str
+    instruction: str            # tailored prompt for this agent
+    depends_on: list[str]       # agent names this subtask depends on
 ```
 
-## Key Components
+The planner uses the orchestrator playbook (`agents/playbooks/orchestrator.md`) and receives available agent capabilities plus user memory context. A keyword-based fallback handles cases where the LLM planner fails.
 
-### 1. `agents/base.py` - BaseAgent
+**Examples:**
 
-Extract the ReAct loop from [services/ai.py](services/ai.py) into a reusable base class. Each agent instance gets:
+| Query | Plan |
+|-------|------|
+| "What's AAPL trading at?" | `stock` only |
+| "What's happening with AAPL?" | `stock` + `news` in parallel |
+| "Get AAPL price, alert me if above $200" | `stock` then `alerts` sequentially |
+| "Give me a random medium problem" | `leetcode` only |
 
-- Its own `system_prompt`
-- Its own `tool_definitions` list (domain tools + its own memory tools)
-- Its own `execute_tool()` dispatch method
-- Its own `AgentMemory` instance (namespace-scoped, fully isolated from other agents)
-- Shared OpenAI client (single `AsyncOpenAI` instance passed in)
+### Phase 2: Execute
 
-Before each ReAct loop run, BaseAgent automatically:
+- **Parallel**: Independent subtasks run concurrently via `asyncio.gather`
+- **Sequential**: Subtasks with dependencies run in order; each agent receives `peer_context` containing results from agents it depends on
 
-1. Loads the user's conversation history **from this agent's namespace only**
-2. Loads the user's preferences **from this agent's namespace only**
-3. Injects both as context into the system prompt
-4. After the run completes, saves the exchange to this agent's conversation store
+### Phase 3: Synthesize
 
-### 2. `agents/router.py` - AgentRouter
+- **Single agent**: Result passes through directly (no extra LLM call)
+- **Multiple agents**: An LLM call merges all agent outputs into one coherent response under 1800 characters
 
-Routes `/ask` queries to the right agent using keyword matching with LLM fallback:
+## Agent System
 
-- Keywords like "stock", "price", "AAPL", "$" route to StockAgent
-- Keywords like "news", "headline", "briefing" route to NewsAgent
-- Keywords like "alert", "remind", "due date", "notify me" route to AlertAgent
-- Everything else routes to LeetCodeAgent (default)
-- If ambiguous, a cheap LLM call classifies the intent
+### BaseAgent (`agents/base.py`)
 
-### 3. `services/stock.py` - StockService
+All agents inherit from `BaseAgent`, which provides:
 
-Uses `yfinance` (no API key). Methods:
+- **Playbook-driven prompts**: System prompt loaded from `agents/playbooks/{name}.md` at init (no hardcoded strings)
+- **ReAct loop**: Up to `max_iterations` cycles of LLM calls with tool use
+- **RAG memory injection**: Before each run, semantically relevant memories are retrieved and injected into the system prompt
+- **Peer context**: When running as part of a multi-agent task, agents can see other agents' results via the `peer_context` parameter
+- **Memory tools**: `recall_memory`, `save_preference`, `save_fact` available to all agents
 
-- `get_quote(symbol)` - current price, change, volume
-- `get_daily_summary(symbol)` - open/high/low/close, market cap
-- `get_movers()` - top gainers/losers (S&P 500 index components)
-- `search_symbol(query)` - look up ticker by company name
+### Specialist Agents
 
-### 4. `services/news.py` - NewsService
+| Agent | File | Service | Domain Tools |
+|-------|------|---------|-------------|
+| LeetCode | `agents/leetcode.py` | `LeetCodeService` | `get_daily_challenge`, `get_problem`, `search_problems`, `get_problems_by_tag`, `get_random_problem`, `get_user_stats` |
+| Stock | `agents/stock.py` | `StockService` | `get_stock_quote`, `get_stock_summary`, `get_market_movers`, `search_stock_symbol` |
+| News | `agents/news.py` | `NewsService` | `get_latest_news`, `get_market_news`, `search_news` |
+| Alerts | `agents/alerts.py` | `AlertService` | `create_price_alert`, `create_reminder`, `list_alerts`, `delete_alert` |
 
-Uses `feedparser` to parse RSS feeds. Methods:
+All agents share a single `MemoryManager` instance (the memory system handles per-agent scoping internally).
 
-- `get_latest(category, limit)` - latest headlines from configured feeds
-- `get_market_news(limit)` - stock/finance-specific news
-- `search_news(keyword)` - filter feed entries by keyword
+## Playbook System
 
-Default RSS sources: Reuters Top News, AP News, MarketWatch, CNBC
+Agent behavior is defined in markdown files under `agents/playbooks/`:
 
-### 5. `services/alerts.py` - AlertService
+| File | Purpose |
+|------|---------|
+| `_base.md` | Shared rules for all agents (memory usage, collaboration, formatting) |
+| `orchestrator.md` | How to plan tasks, choose agents, and synthesize results |
+| `leetcode.md` | LeetCode agent role, memory guidelines, collaboration rules |
+| `stock.md` | Stock agent role, memory guidelines, collaboration rules |
+| `news.md` | News agent role, memory guidelines, collaboration rules |
+| `alerts.md` | Alerts agent role, memory guidelines, collaboration rules |
 
-JSON-file persistence in `data/alerts.json`. Alert types:
+At init, each agent loads `_base.md` + its own playbook and uses the combined text as its system prompt. To change agent behavior, edit the `.md` file -- no code changes needed.
 
-- **Stock price alert**: trigger when symbol crosses a price threshold (above/below)
-- **Due date reminder**: trigger at a specific date/time, with optional repeat
+Each playbook defines:
 
-Methods:
+- **Role**: What the agent is and what it does
+- **Capabilities**: Summary of available tools
+- **Guidelines**: Response style and formatting rules
+- **Memory Guidelines**: What to save to long-term memory, what to share cross-agent
+- **Collaboration**: How to behave when working alongside other agents
 
-- `create_alert(user_id, alert_type, config)` - create a new alert
-- `list_alerts(user_id)` - list user's active alerts
-- `delete_alert(user_id, alert_id)` - remove an alert
-- `check_alerts()` - called by scheduler, returns list of triggered alerts
+## Memory System
 
-### 6. `bot/cogs/scheduler.py` - Consolidated Scheduler
+### Architecture
 
-Replaces [bot/cogs/daily_notify.py](bot/cogs/daily_notify.py). Single cog with multiple scheduled tasks:
-
-- **Daily LeetCode** (existing logic, migrated)
-- **Daily news briefing** - posts morning headlines to configured channel
-- **Alert checker** - `tasks.loop(minutes=5)` checks stock prices and due dates, DMs users when triggered
-
-### 7. `bot/cogs/ai.py` - Updated /ask
-
-The `/ask` command uses the router to dispatch to the right agent. Response includes which agent handled the query in the embed footer.
-
-### 8. New Slash Commands
-
-- `/stock quote <symbol>` - quick stock quote
-- `/stock summary <symbol>` - detailed daily summary
-- `/news latest [category]` - latest headlines
-- `/news market` - market/finance news
-- `/alert price <symbol> <above|below> <price>` - set stock price alert
-- `/alert remind <message> <date>` - set a due-date reminder
-- `/alert list` - view your alerts
-- `/alert delete <id>` - remove an alert
-
-### 9. `services/memory.py` - AgentMemory
-
-A namespace-scoped memory class. Each agent creates its own `AgentMemory("leetcode")`, `AgentMemory("stock")`, etc. Data is stored in separate directories so agents cannot see each other's history or preferences.
-
-**Storage layout:**
+ChromaDB-backed RAG memory with three collections:
 
 ```
-data/memory/
-  leetcode/
-    conversations/{user_id}.json
-    preferences/{user_id}.json
-  stock/
-    conversations/{user_id}.json
-    preferences/{user_id}.json
-  news/
-    conversations/{user_id}.json
-    preferences/{user_id}.json
-  alerts/
-    conversations/{user_id}.json
-    preferences/{user_id}.json
+services/memory/
+  __init__.py         # MemoryManager facade
+  chroma_store.py     # ChromaDB wrapper (3 collections)
+  short_term.py       # Recent conversations with TTL
+  long_term.py        # Persistent facts and preferences
+  shared.py           # Cross-agent knowledge base
+  migration.py        # Legacy JSON-to-ChromaDB migration
 ```
 
-**Conversation History** (per agent, per user):
+### Collections
 
-- Stores the last N exchanges (question + answer + timestamp)
-- Entries older than `MEMORY_TTL_DAYS` are pruned on access
-- Capped at `MEMORY_MAX_CONVERSATIONS` per user (default 50)
-- The LeetCode agent only sees past LeetCode conversations, stock agent only sees past stock conversations, etc.
+| Collection | Contents | Metadata | Expiry |
+|-----------|----------|----------|--------|
+| `short_term` | Conversation Q&A pairs | `user_id`, `agent_name`, `timestamp` | TTL-based (default 7 days) |
+| `long_term` | User preferences, curated facts | `user_id`, `agent_name`, `category`, `importance` | Never |
+| `shared` | Cross-agent knowledge | `source_agent`, `topic`, `timestamp` | Never |
 
-**User Preferences** (per agent, per user):
+### How Recall Works (RAG)
 
-- Key-value store scoped to the agent's domain
-- LeetCode agent stores: `{"username": "john", "preferred_difficulty": "Medium"}`
-- Stock agent stores: `{"watchlist": ["AAPL", "TSLA"], "default_market": "US"}`
-- News agent stores: `{"topics": ["tech", "AI"], "preferred_sources": ["reuters"]}`
-- Alert agent stores: `{"timezone": "US/Eastern", "quiet_hours": "22-07"}`
-- Each key expires after `MEMORY_TTL_DAYS` unless refreshed
+When an agent runs, `MemoryManager.recall()` performs semantic search:
 
-**Per-Agent Memory Tools** (each agent gets its own pair, scoped to its namespace):
+1. Embed the current query
+2. Search `short_term` for recent relevant conversations (filtered by `user_id` + `agent_name`)
+3. Search `long_term` for relevant facts and preferences (filtered by `user_id`)
+4. Search `shared` for cross-agent knowledge relevant to the query
+5. Combine results into a `MemoryContext` and inject into the system prompt
 
-- `recall_memory(user_id)` - retrieve this agent's conversations and preferences for the user
-- `save_preference(user_id, key, value)` - persist a preference in this agent's namespace
+Only semantically relevant memories are retrieved -- not all history. This saves context window tokens and surfaces the most useful context.
 
-These tools are defined in each agent's module (e.g. `agents/stock.py`) and dispatch to that agent's `AgentMemory` instance. One agent's `save_preference` cannot write to another agent's store.
+### Memory Tools
 
-**TTL and Cleanup:**
+Agents have three memory tools:
 
-- Default TTL: 7 days (configurable via `MEMORY_TTL_DAYS`)
-- Stale entries pruned lazily on read
-- Scheduler runs periodic cleanup across all namespaces
+| Tool | Purpose | Storage |
+|------|---------|---------|
+| `recall_memory` | Retrieve relevant past context for a user | Reads from all layers |
+| `save_preference` | Save a user preference (e.g. watchlist, username) | Long-term (never expires) |
+| `save_fact` | Save an important fact or insight | Long-term with importance level |
 
-### 10. Dependencies
+### Embeddings
 
-Add to [requirements.txt](requirements.txt):
+- With `OPENAI_API_KEY` set: uses OpenAI `text-embedding-3-small` for high-quality embeddings
+- Without API key: falls back to local `all-MiniLM-L6-v2` model (downloaded automatically, ~80MB)
 
-- `yfinance` (stock data)
-- `feedparser` (RSS parsing)
+### Data Storage
 
-### 11. Config
-
-Add to [config.py](config.py):
-
-- `RSS_FEEDS` - dict of category to feed URLs
-- `ALERT_CHECK_INTERVAL` - minutes between alert checks (default 5)
-- `MEMORY_TTL_DAYS` - how long memories persist (default 7)
-- `MEMORY_MAX_CONVERSATIONS` - max conversation entries per user (default 50)
-
-## Agent Isolation
-
-Each agent is fully sandboxed with three layers of isolation:
-
-1. **Tool isolation** -- each agent has its own `tool_definitions` and `execute_tool` dispatcher; it can only call tools for its own domain
-2. **Memory isolation** -- each agent has its own `AgentMemory` namespace; conversation history and preferences are stored in separate directories on disk
-3. **Prompt isolation** -- each agent has its own system prompt tailored to its domain
-
-The LeetCode agent cannot see stock conversations, the stock agent cannot read alert preferences, etc.
-
-```mermaid
-flowchart LR
-    subgraph leetcodeAgent [LeetCode Agent]
-        LP[Prompt: LeetCode tutor]
-        LT["Tools: get_problem, search, daily..."]
-        LM["Memory: data/memory/leetcode/"]
-    end
-    subgraph stockAgent [Stock Agent]
-        SP[Prompt: Market analyst]
-        ST["Tools: get_quote, get_summary, movers..."]
-        SM["Memory: data/memory/stock/"]
-    end
-    subgraph newsAgent [News Agent]
-        NP[Prompt: News curator]
-        NT["Tools: get_latest, market_news, search..."]
-        NM["Memory: data/memory/news/"]
-    end
-    subgraph alertAgent [Alert Agent]
-        AP[Prompt: Personal assistant]
-        AT["Tools: create_alert, list, delete..."]
-        AM["Memory: data/memory/alerts/"]
-    end
+```
+data/chromadb/           # ChromaDB vector store (auto-created on first use)
+  chroma.sqlite3         # Metadata and mappings
+  {collection-uuid}/     # Vector data per collection
 ```
 
+## Configuration
 
+All values from `.env` via `python-dotenv`:
 
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `DISCORD_TOKEN` | required | Discord bot token |
+| `OPENAI_API_KEY` | required | OpenAI API key for agents and embeddings |
+| `AI_MODEL` | `gpt-4o-mini` | LLM model for agents and orchestrator |
+| `AGENT_MAX_ITERATIONS` | `8` | Max ReAct iterations per agent run |
+| `CHROMA_PERSIST_DIR` | `data/chromadb` | ChromaDB storage directory |
+| `MEMORY_SHORT_TERM_TTL_DAYS` | `7` | Short-term memory expiry |
+| `MEMORY_RECALL_LIMIT` | `5` | Number of memories to retrieve per recall |
+| `EMBEDDING_MODEL` | `text-embedding-3-small` | OpenAI embedding model |
+
+## Data Flow
+
+| Feature | Flow |
+|---------|------|
+| `/ask "AAPL price and news"` | AICog -> Orchestrator -> Plan (stock+news parallel) -> Execute both -> Synthesize -> embed |
+| `/ask "What's the daily?"` | AICog -> Orchestrator -> Plan (leetcode only) -> Execute -> pass through |
+| `/ask "AAPL price, alert if above 200"` | AICog -> Orchestrator -> Plan (stock then alerts) -> Execute sequentially with peer_context -> Synthesize |
+| `/leetcode daily` | LeetCodeCog -> LeetCodeService -> embed |
+| `/stock quote AAPL` | StockCog -> StockService -> embed |
+| Memory recall | Agent.run() -> MemoryManager.recall() -> ChromaDB semantic search -> inject into system prompt |
+| Memory save | Agent tool call -> MemoryManager.save_preference/save_fact -> ChromaDB upsert |
